@@ -2,7 +2,7 @@ import math
 
 import networkx as nx
 import overpy
-from pyproj import Transformer
+from pyproj import Geod, Transformer
 from shapely.geometry import LineString
 from src.tram_track_graph_transformer.exceptions import (
     TrackDirectionChangeError,
@@ -37,12 +37,26 @@ class TramTrackGraphTransformer:
                 lat=float(node.lat),
                 lon=float(node.lon),
                 type=NodeType.get_by_value_safe(node.tags.get("railway")),
+                name=node.tags.get("name"),
             )
             for node in tram_stops_and_tracks.get_nodes()
         }
         self._tram_track_graph = self._build_tram_track_graph_from_osm_ways()
         self._permanent_nodes = self._find_permanent_nodes()
         self._max_node_id = max(node.id for node in self._permanent_nodes)
+
+    def _build_nodes_by_id_dict(self, nodes: list[overpy.Node]) -> dict[int, Node]:
+        nodes_by_id = {}
+        for node in nodes:
+            node_type = NodeType.get_by_value_safe(node.tags.get("railway"))
+            nodes_by_id[node.id] = Node(
+                id=node.id,
+                lat=float(node.lat),
+                lon=float(node.lon),
+                type=node_type,
+                name=node.tags.get("name") if node_type == NodeType.TRAM_STOP else None,
+            )
+        return nodes_by_id
 
     def _build_tram_track_graph_from_osm_ways(self):
         graph = nx.DiGraph()
@@ -180,6 +194,7 @@ class TramTrackGraphTransformer:
         last_node: Node,
     ):
         previous_graph_node = first_node
+        geod = Geod(ellps="WGS84")
 
         for lat, lon in interpolated_node_coordinates[1:-1]:
             if (lat, lon) in nodes_by_coordinates:
@@ -193,14 +208,30 @@ class TramTrackGraphTransformer:
                 )
                 nodes_by_coordinates[(lat, lon)] = new_node
 
-            densified_graph.add_edge(previous_graph_node, new_node)
+            azimuth, _, length = geod.inv(
+                previous_graph_node.lon,
+                previous_graph_node.lat,
+                new_node.lon,
+                new_node.lat,
+            )
+            densified_graph.add_edge(
+                previous_graph_node, new_node, azimuth=azimuth, length=length
+            )
             previous_graph_node = new_node
 
         lat, lon = interpolated_node_coordinates[-1]
         if (lat, lon) in nodes_by_coordinates:
             last_node = nodes_by_coordinates[(lat, lon)]
 
-        densified_graph.add_edge(previous_graph_node, last_node)
+        azimuth, _, length = geod.inv(
+            previous_graph_node.lon,
+            previous_graph_node.lat,
+            last_node.lon,
+            last_node.lat,
+        )
+        densified_graph.add_edge(
+            previous_graph_node, last_node, azimuth=azimuth, length=length
+        )
 
     def densify_graph_by_max_distance(
         self, max_distance_in_meters: float
